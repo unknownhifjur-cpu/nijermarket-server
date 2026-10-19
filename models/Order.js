@@ -22,7 +22,17 @@ const deliveryAddressSchema = new mongoose.Schema({
   longitude: { type: Number, min: -180, max: 180 }
 }, { _id: false });
 
+const trackingEventSchema = new mongoose.Schema({
+  status: { type: String, required: true, maxlength: 40 },
+  timestamp: { type: Date, required: true, default: Date.now },
+  note: { type: String, trim: true, maxlength: 240, default: "" },
+  actorId: { type: String, default: "" },
+  actorName: { type: String, default: "" },
+  actorRole: { type: String, default: "" }
+}, { _id: false });
+
 const orderSchema = new mongoose.Schema({
+  orderNumber: { type: String, trim: true },
   userId: String,
   customerName: String,
   customerEmail: String,
@@ -38,13 +48,18 @@ const orderSchema = new mongoose.Schema({
   paymentSubmittedAt: Date,
   paymentConfirmedAt: Date,
   paymentConfirmedBy: String,
+  paymentRejectedAt: Date,
+  paymentRejectedBy: String,
   subtotal: { type: Number, default: 0 },
   delivery: { type: Number, default: 0 },
   total: { type: Number, default: 0 },
-  status: { type: String, default: "Placed" },
+  status: { type: String, enum: ["Placed", "Confirmed", "Picking", "Sorting", "Packing", "Packed", "Out for Delivery", "Delivered", "Failed Delivery", "Cancelled"], default: "Placed" },
+  trackingHistory: { type: [trackingEventSchema], default: [] },
   createdAt: { type: Date, default: Date.now },
   updatedAt: { type: Date, default: Date.now }
 });
+
+orderSchema.index({ orderNumber: 1 }, { unique: true, sparse: true });
 
 // Legacy orders without a key remain valid; retries are unique per customer.
 orderSchema.index(

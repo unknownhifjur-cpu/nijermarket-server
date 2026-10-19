@@ -8,6 +8,7 @@ const User = require("./models/User");
 const Order = require("./models/Order");
 const { searchProducts } = require("./src/services/searchService");
 const { categoryKey, getProductCategories, normalizeCategory } = require("./src/utils/categories");
+const { statusNotes, validateOrderTransition, workflowError } = require("./src/services/orderWorkflow");
 
 let mongoConnected = false;
 
@@ -482,20 +483,33 @@ function verifyOrderRetry(order, requestHash) {
 }
 
 async function createOrder(data) {
+  const now = new Date();
+  const orderData = {
+    ...data,
+    orderNumber: data.orderNumber || `NM-${randomUUID().replace(/-/g, "").toUpperCase()}`,
+    trackingHistory: data.trackingHistory || [
+      { status: data.status || "Placed", timestamp: now, note: "Order placed." },
+      ...(data.paymentMethod === "UPI" ? [{
+        status: "Payment submitted",
+        timestamp: data.paymentSubmittedAt || now,
+        note: "Customer submitted UPI payment for shop verification."
+      }] : [])
+    ]
+  };
   if (mongoConnected) {
     try {
-      return normalize(await Order.create(data));
+      return normalize(await Order.create(orderData));
     } catch (error) {
-      if (error.code !== 11000 || !data.idempotencyKey) throw error;
-      const existing = await findOrderSubmission(data.userId, data.idempotencyKey);
+      if (error.code !== 11000 || !orderData.idempotencyKey) throw error;
+      const existing = await findOrderSubmission(orderData.userId, orderData.idempotencyKey);
       if (!existing) throw error;
-      return verifyOrderRetry(existing, data.requestHash);
+      return verifyOrderRetry(existing, orderData.requestHash);
     }
   }
   // No await between checking and inserting: concurrent demo requests cannot duplicate.
-  const existing = data.idempotencyKey && demo.orders.find(order => order.userId === data.userId && order.idempotencyKey === data.idempotencyKey);
-  if (existing) return verifyOrderRetry(existing, data.requestHash);
-  const order = { ...data, _id: `demo-order-${randomUUID()}`, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() };
+  const existing = orderData.idempotencyKey && demo.orders.find(order => order.userId === orderData.userId && order.idempotencyKey === orderData.idempotencyKey);
+  if (existing) return verifyOrderRetry(existing, orderData.requestHash);
+  const order = { ...orderData, _id: `demo-order-${randomUUID()}`, createdAt: now.toISOString(), updatedAt: now.toISOString() };
   demo.orders.unshift(order);
   return order;
 }
@@ -505,33 +519,78 @@ async function listOrders({ userId, all = false } = {}) {
   return demo.orders.filter(order => all || order.userId === userId);
 }
 
-async function updateOrderStatus(id, status) {
-  if (!["Placed", "Packed", "Out for Delivery", "Delivered", "Cancelled"].includes(status)) {
-    throw orderError("Invalid order status", 400);
-  }
+function orderTrackingEvent(status, audit = {}, timestamp = new Date()) {
+  return {
+    status,
+    timestamp,
+    note: String(audit.note || statusNotes[status] || "").trim().slice(0, 240),
+    actorId: String(audit.actor?.id || ""),
+    actorName: String(audit.actor?.name || ""),
+    actorRole: String(audit.actor?.role || "")
+  };
+}
+
+async function updateOrderStatus(id, status, audit = {}) {
   if (mongoConnected && !mongoose.isValidObjectId(id)) return null;
-  if (mongoConnected) return normalize(await Order.findByIdAndUpdate(id, { status, updatedAt: new Date() }, { new: true }));
-  const order = demo.orders.find(item => item._id === id);
+  if (mongoConnected) {
+    const filter = { _id: id, ...(audit.userId ? { userId: audit.userId } : {}) };
+    const existing = await Order.findOne(filter).lean();
+    if (!existing) return null;
+    const current = { ...existing, status: existing.status || "Placed" };
+    if (audit.customerCancellation && !["Placed", "Cancelled"].includes(current.status)) {
+      throw workflowError("Orders can only be cancelled before confirmation.", 409);
+    }
+    if (!validateOrderTransition(current, status)) return normalize(existing);
+    const timestamp = new Date();
+    const compareStatus = existing.status ? { status: existing.status } : { status: { $exists: false } };
+    const updated = await Order.findOneAndUpdate(
+      { ...filter, ...compareStatus },
+      {
+        $set: { status, updatedAt: timestamp },
+        $push: { trackingHistory: orderTrackingEvent(status, audit, timestamp) }
+      },
+      { new: true, runValidators: true }
+    );
+    if (updated) return normalize(updated);
+    const latest = await Order.findOne(filter).lean();
+    if (!latest) return null;
+    if (latest.status === status) return normalize(latest);
+    throw workflowError("This order changed. Refresh it and try again.", 409);
+  }
+  const order = demo.orders.find(item => item._id === id && (!audit.userId || item.userId === audit.userId));
   if (!order) return null;
+  if (audit.customerCancellation && !["Placed", "Cancelled"].includes(order.status)) {
+    throw workflowError("Orders can only be cancelled before confirmation.", 409);
+  }
+  if (!validateOrderTransition(order, status)) return order;
+  const timestamp = new Date();
   order.status = status;
-  order.updatedAt = new Date().toISOString();
+  order.updatedAt = timestamp.toISOString();
+  order.trackingHistory = [...(order.trackingHistory || []), orderTrackingEvent(status, audit, timestamp)];
   return order;
 }
 
 async function updatePaymentStatus(id, paymentStatus, audit = {}) {
   if (!["paid", "payment_rejected"].includes(paymentStatus)) throw orderError("Invalid payment action", 400);
   if (paymentStatus === "paid" && !audit.confirmedBy) throw orderError("Payment confirmer is required", 400);
-  const update = { paymentStatus, updatedAt: new Date() };
+  const timestamp = new Date();
+  const update = { paymentStatus, updatedAt: timestamp };
   if (paymentStatus === "paid") {
-    update.paymentConfirmedAt = new Date();
+    update.paymentConfirmedAt = timestamp;
     update.paymentConfirmedBy = String(audit.confirmedBy);
+  } else {
+    update.paymentRejectedAt = timestamp;
+    update.paymentRejectedBy = String(audit.confirmedBy || "");
   }
   if (mongoConnected) {
     if (!mongoose.isValidObjectId(id)) return null;
     // Compare-and-set prevents two admins from approving/rejecting the same submission.
     const changed = await Order.findOneAndUpdate(
       { _id: id, paymentMethod: "UPI", paymentStatus: "payment_submitted" },
-      { $set: update },
+      {
+        $set: update,
+        $push: { trackingHistory: orderTrackingEvent(paymentStatus === "paid" ? "Payment verified" : "Payment rejected", { ...audit, note: paymentStatus === "paid" ? "UPI payment verified by the shop." : "UPI payment could not be verified." }, timestamp) }
+      },
       { new: true, runValidators: true }
     );
     if (changed) return normalize(changed);
@@ -546,7 +605,8 @@ async function updatePaymentStatus(id, paymentStatus, audit = {}) {
   if (order.paymentMethod !== "UPI" || order.paymentStatus !== "payment_submitted") {
     throw orderError("Only UPI payments awaiting verification can be confirmed or rejected. Refresh this order.", 409);
   }
-  Object.assign(order, update, { updatedAt: new Date().toISOString() });
+  Object.assign(order, update, { updatedAt: timestamp.toISOString() });
+  order.trackingHistory = [...(order.trackingHistory || []), orderTrackingEvent(paymentStatus === "paid" ? "Payment verified" : "Payment rejected", { ...audit, note: paymentStatus === "paid" ? "UPI payment verified by the shop." : "UPI payment could not be verified." }, timestamp)];
   return order;
 }
 

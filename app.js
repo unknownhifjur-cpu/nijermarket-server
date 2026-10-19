@@ -274,6 +274,21 @@ app.post("/api/orders", requireAuth, async (req, res) => {
   }
 });
 
+app.patch("/api/orders/:id/cancel", requireAuth, async (req, res) => {
+  try {
+    const order = await store.updateOrderStatus(req.params.id, "Cancelled", {
+      userId: req.user.id,
+      customerCancellation: true,
+      actor: { id: req.user.id, name: req.user.name, role: req.user.role },
+      note: "Cancelled by customer."
+    });
+    if (!order) return res.status(404).json({ message: "Order not found" });
+    res.json(order);
+  } catch (error) {
+    sendStoreError(res, error, "Unable to cancel order");
+  }
+});
+
 app.get("/api/announcements", async (req, res) => {
   try {
     res.json(await store.listAnnouncements());
@@ -374,7 +389,11 @@ app.delete("/api/admin/announcements/:id", requireAuth, requireAdmin, async (req
 });
 app.patch("/api/admin/orders/:id", requireAuth, requireAdmin, async (req, res) => {
   try {
-    const order = await store.updateOrderStatus(req.params.id, req.body.status);
+    const note = typeof req.body?.note === "string" ? req.body.note.trim().slice(0, 240) : "";
+    const order = await store.updateOrderStatus(req.params.id, req.body.status, {
+      actor: { id: req.user.id, name: req.user.name, role: req.user.role },
+      note
+    });
     if (!order) return res.status(404).json({ message: "Order not found" });
     res.json(order);
   } catch (error) {
@@ -383,7 +402,10 @@ app.patch("/api/admin/orders/:id", requireAuth, requireAdmin, async (req, res) =
 });
 app.patch("/api/admin/orders/:id/payment/confirm", requireAuth, requireAdmin, async (req, res) => {
   try {
-    const order = await store.updatePaymentStatus(req.params.id, "paid", { confirmedBy: req.user.email || req.user.id });
+    const order = await store.updatePaymentStatus(req.params.id, "paid", {
+      confirmedBy: req.user.email || req.user.id,
+      actor: { id: req.user.id, name: req.user.name, role: req.user.role }
+    });
     if (!order) return res.status(404).json({ message: "Order not found" });
     res.json(order);
   } catch (error) {
@@ -392,7 +414,10 @@ app.patch("/api/admin/orders/:id/payment/confirm", requireAuth, requireAdmin, as
 });
 app.patch("/api/admin/orders/:id/payment/reject", requireAuth, requireAdmin, async (req, res) => {
   try {
-    const order = await store.updatePaymentStatus(req.params.id, "payment_rejected");
+    const order = await store.updatePaymentStatus(req.params.id, "payment_rejected", {
+      confirmedBy: req.user.email || req.user.id,
+      actor: { id: req.user.id, name: req.user.name, role: req.user.role }
+    });
     if (!order) return res.status(404).json({ message: "Order not found" });
     res.json(order);
   } catch (error) {
