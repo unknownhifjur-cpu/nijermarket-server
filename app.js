@@ -9,6 +9,7 @@ const { corsOrigins } = require("./src/config/environment");
 const { getPaymentConfig } = require("./src/config/payment");
 const { normalizeItems, priceOrder } = require("./src/services/orderPricing");
 const { createHash } = require("crypto");
+const { normalizeDeliveryAddress, formatDeliveryAddress } = require("./src/services/deliveryAddress");
 
 const app = express();
 
@@ -82,7 +83,7 @@ async function login(req, res, adminOnly = false) {
   if (!user || (adminOnly && user.role !== "admin") || !(await bcrypt.compare(password, user.passwordHash || ""))) {
     return res.status(401).json({ message: adminOnly ? "Invalid admin credentials" : "Invalid credentials" });
   }
-  const { passwordHash, ...safeUser } = user;
+  const { passwordHash, deliveryAddress, ...safeUser } = user;
   res.json({ token: signUser(user), user: safeUser });
 }
 
@@ -107,7 +108,7 @@ app.post("/api/auth/register", async (req, res) => {
       passwordHash: await bcrypt.hash(password, 12),
       role: "customer"
     });
-    const { passwordHash, ...safeUser } = user;
+    const { passwordHash, deliveryAddress, ...safeUser } = user;
     res.status(201).json({ token: signUser(user), user: safeUser });
   } catch (error) {
     if (error.code === 11000) return res.status(409).json({ message: "An account with this email already exists" });
@@ -120,8 +121,29 @@ app.post("/api/auth/login", (req, res) => login(req, res).catch(error => res.sta
 app.get("/api/auth/me", requireAuth, async (req, res) => {
   const user = await store.findUserById(req.user.id);
   if (!user) return res.status(401).json({ message: "Account no longer exists" });
-  const { passwordHash, ...safeUser } = user;
+  const { passwordHash, deliveryAddress, ...safeUser } = user;
   res.json({ user: safeUser });
+});
+
+app.get("/api/account/delivery-address", requireAuth, async (req, res) => {
+  try {
+    const user = await store.findUserById(req.user.id);
+    if (!user) return res.status(404).json({ message: "Account no longer exists" });
+    res.set("Cache-Control", "no-store").json({ address: user.deliveryAddress || null });
+  } catch (error) {
+    sendStoreError(res, error, "Unable to load your saved delivery address");
+  }
+});
+
+app.put("/api/account/delivery-address", requireAuth, async (req, res) => {
+  try {
+    const address = normalizeDeliveryAddress(req.body?.address);
+    const user = await store.saveDeliveryAddress(req.user.id, address);
+    if (!user) return res.status(404).json({ message: "Account no longer exists" });
+    res.set("Cache-Control", "no-store").json({ address: user.deliveryAddress });
+  } catch (error) {
+    sendStoreError(res, error, "Unable to save your delivery address");
+  }
 });
 
 app.get("/api/orders/my", requireAuth, async (req, res) => {
@@ -142,8 +164,15 @@ app.post("/api/orders/quote", async (req, res) => {
 
 app.post("/api/orders", requireAuth, async (req, res) => {
   try {
-    const { items, address = "", phone = "", paymentMethod = "COD", utr = "", clientRequestId = "" } = req.body || {};
-    if (String(address).trim().length < 5 || String(phone).trim().length < 7) {
+    const { items, paymentMethod = "COD", utr = "", clientRequestId = "" } = req.body || {};
+    const deliveryAddress = req.body?.deliveryAddress
+      ? normalizeDeliveryAddress(req.body.deliveryAddress)
+      : null;
+    const address = deliveryAddress
+      ? formatDeliveryAddress(deliveryAddress)
+      : String(req.body?.address || "").trim();
+    const phone = deliveryAddress ? deliveryAddress.phone : String(req.body?.phone || "").trim();
+    if (deliveryAddress ? address.length < 5 : address.length < 5 || phone.length < 7) {
       return res.status(400).json({ message: "A valid address and phone number are required" });
     }
     if (!["COD", "UPI"].includes(paymentMethod)) {
@@ -159,9 +188,15 @@ app.post("/api/orders", requireAuth, async (req, res) => {
       return res.status(400).json({ message: "A valid checkout request ID is required. Refresh checkout." });
     }
     const normalizedItems = normalizeItems(items);
-    const requestHash = createHash("sha256")
-      .update(JSON.stringify({ items: normalizedItems, address: String(address).trim(), phone: String(phone).trim(), paymentMethod, utr: paymentMethod === "UPI" ? cleanUtr : "" }))
-      .digest("hex");
+    const hashPayload = {
+      items: normalizedItems,
+      address,
+      phone,
+      ...(deliveryAddress ? { deliveryAddress } : {}),
+      paymentMethod,
+      utr: paymentMethod === "UPI" ? cleanUtr : ""
+    };
+    const requestHash = createHash("sha256").update(JSON.stringify(hashPayload)).digest("hex");
     // Resolve successful retries before checking stock, prices or current payment configuration.
     const existing = await store.findOrderSubmission(req.user.id, idempotencyKey);
     if (existing) return res.json(store.verifyOrderRetry(existing, requestHash));
@@ -180,8 +215,9 @@ app.post("/api/orders", requireAuth, async (req, res) => {
       customerName: req.user.name,
       customerEmail: req.user.email,
       items: priced.items,
-      address: String(address).trim(),
-      phone: String(phone).trim(),
+      address,
+      phone,
+      ...(deliveryAddress ? { deliveryAddress, customerName: deliveryAddress.fullName } : {}),
       paymentMethod,
       // Only "unpaid" (COD) or "payment_submitted" (UPI) can ever be set here.
       paymentStatus: paymentMethod === "UPI" ? "payment_submitted" : "unpaid",

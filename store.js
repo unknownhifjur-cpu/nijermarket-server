@@ -171,6 +171,21 @@ async function findUserById(id) {
   return mongoConnected ? normalize(await User.findById(id)) : demo.users.find(user => user._id === id) || null;
 }
 
+async function saveDeliveryAddress(userId, address) {
+  if (mongoConnected) {
+    if (!mongoose.isValidObjectId(userId)) return null;
+    return normalize(await User.findByIdAndUpdate(
+      userId,
+      { $set: { deliveryAddress: address } },
+      { new: true, runValidators: true }
+    ));
+  }
+  const user = demo.users.find(item => item._id === userId);
+  if (!user) return null;
+  user.deliveryAddress = { ...address };
+  return user;
+}
+
 async function createUser(data) {
   if (mongoConnected) return normalize(await User.create(data));
   const user = { ...data, _id: `demo-user-${Date.now()}` };
@@ -350,6 +365,7 @@ module.exports = {
   findUserByEmail,
   findUserByIdentifier,
   findUserById,
+  saveDeliveryAddress,
   normalizePhone,
   createUser,
   createOrder,
