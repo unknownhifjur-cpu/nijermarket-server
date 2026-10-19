@@ -56,6 +56,11 @@ app.get("/api/products", async (req, res) => {
   catch (error) { res.status(500).json({ message: error.message }); }
 });
 
+app.get("/api/products/categories", async (req, res) => {
+  try { res.json({ categories: await store.listProductCategories() }); }
+  catch (error) { res.status(500).json({ message: "Unable to load product categories" }); }
+});
+
 app.get("/api/products/search", async (req, res) => {
   try {
     const query = String(req.query.q || "").trim().slice(0, 80);
@@ -326,6 +331,9 @@ app.patch("/api/admin/orders/:id/payment/reject", requireAuth, requireAdmin, asy
 app.post("/api/admin/products", requireAuth, requireAdmin, async (req, res) => {
   try {
     if (!String(req.body?.name || "").trim()) return res.status(400).json({ message: "Product name is required" });
+    if (Object.prototype.hasOwnProperty.call(req.body || {}, "category") && (typeof req.body.category !== "string" || !req.body.category.trim())) {
+      return res.status(400).json({ message: "Product category must be a non-empty string" });
+    }
     res.status(201).json(await store.createProduct(req.body));
   } catch (error) {
     console.error("Product creation failed:", error.message);
@@ -334,6 +342,9 @@ app.post("/api/admin/products", requireAuth, requireAdmin, async (req, res) => {
 });
 app.put("/api/admin/products/:id", requireAuth, requireAdmin, async (req, res) => {
   try {
+    if (Object.prototype.hasOwnProperty.call(req.body || {}, "category") && (typeof req.body.category !== "string" || !req.body.category.trim())) {
+      return res.status(400).json({ message: "Product category must be a non-empty string" });
+    }
     const existing = await store.getProduct(req.params.id);
     if (!existing) return res.status(404).json({ message: "Product not found" });
     const product = await store.updateProduct(req.params.id, req.body);

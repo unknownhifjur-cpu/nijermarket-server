@@ -6,6 +6,7 @@ const Product = require("./models/Product");
 const User = require("./models/User");
 const Order = require("./models/Order");
 const { searchProducts } = require("./src/services/searchService");
+const { categoryKey, getProductCategories, normalizeCategory } = require("./src/utils/categories");
 
 let mongoConnected = false;
 
@@ -103,14 +104,23 @@ async function initStore() {
   }
 }
 
+async function availableProducts() {
+  return mongoConnected
+    ? (await Product.find({}).sort({ createdAt: -1 })).map(normalize)
+    : [...demo.products];
+}
+
 async function listProducts({ search = "", category = "" } = {}) {
-  if (mongoConnected) {
-    const query = category && category !== "All" ? { category } : {};
-    const products = (await Product.find(query).sort({ createdAt: -1 })).map(normalize);
-    return search ? (await searchProducts({ products, query: search, category })).products : products;
+  const selectedCategory = categoryKey(category);
+  let products = await availableProducts();
+  if (selectedCategory && selectedCategory !== "all") {
+    products = products.filter(product => categoryKey(product.category) === selectedCategory);
   }
-  const products = category && category !== "All" ? demo.products.filter(product => product.category === category) : demo.products;
   return search ? (await searchProducts({ products, query: search, category })).products : products;
+}
+
+async function listProductCategories() {
+  return getProductCategories(await availableProducts());
 }
 
 async function searchProductCatalog({ query = "", category = "" } = {}) {
@@ -124,17 +134,25 @@ async function getProduct(id) {
 }
 
 async function createProduct(data) {
-  if (mongoConnected) return normalize(await Product.create(data));
-  const product = { ...data, _id: `demo-product-${Date.now()}` };
+  const productData = { ...data };
+  if (Object.prototype.hasOwnProperty.call(productData, "category")) {
+    productData.category = normalizeCategory(productData.category);
+  }
+  if (mongoConnected) return normalize(await Product.create(productData));
+  const product = { ...productData, _id: `demo-product-${Date.now()}` };
   demo.products.unshift(product);
   return product;
 }
 
 async function updateProduct(id, data) {
-  if (mongoConnected) return normalize(await Product.findByIdAndUpdate(id, data, { new: true }));
+  const productData = { ...data };
+  if (Object.prototype.hasOwnProperty.call(productData, "category")) {
+    productData.category = normalizeCategory(productData.category);
+  }
+  if (mongoConnected) return normalize(await Product.findByIdAndUpdate(id, productData, { new: true }));
   const index = demo.products.findIndex(product => product._id === id);
   if (index < 0) return null;
-  demo.products[index] = { ...demo.products[index], ...data };
+  demo.products[index] = { ...demo.products[index], ...productData };
   return demo.products[index];
 }
 
@@ -357,6 +375,7 @@ module.exports = {
   isMongoConnected,
   demoProducts: demo.products,
   listProducts,
+  listProductCategories,
   searchProductCatalog,
   getProduct,
   createProduct,
