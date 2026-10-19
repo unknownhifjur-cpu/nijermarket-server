@@ -52,8 +52,28 @@ app.get("/api/health", (req, res) => res.json({ status: "ok", app: "NIJER MARKET
 app.get("/api/payment-config", (req, res) => res.json(getPaymentConfig()));
 
 app.get("/api/products", async (req, res) => {
-  try { res.json(await store.listProducts({ search: String(req.query.search || ""), category: String(req.query.category || "") })); }
-  catch (error) { res.status(500).json({ message: error.message }); }
+  try {
+    const pageRequested = Object.prototype.hasOwnProperty.call(req.query, "page") || Object.prototype.hasOwnProperty.call(req.query, "limit");
+    const page = pageRequested ? Number(req.query.page || 1) : undefined;
+    const limit = pageRequested ? Number(req.query.limit || 12) : undefined;
+    if (pageRequested && (!Number.isInteger(page) || page < 1 || !Number.isInteger(limit) || limit < 1 || limit > 100)) {
+      return res.status(400).json({ message: "Page must be positive and limit must be between 1 and 100" });
+    }
+    const filters = await store.resolvePublicCategoryFilters({
+      category: String(req.query.category || ""),
+      mainCategoryId: String(req.query.mainCategoryId || "").trim(),
+      subcategoryId: String(req.query.subcategoryId || "").trim()
+    });
+    res.json(await store.listProducts({
+      search: String(req.query.search || ""),
+      page,
+      limit,
+      shuffleSeed: String(req.query.shuffleSeed || "").slice(0, 64),
+      ...filters
+    }));
+  } catch (error) {
+    sendStoreError(res, error, "Unable to load products");
+  }
 });
 
 app.get("/api/products/categories", async (req, res) => {
@@ -61,15 +81,27 @@ app.get("/api/products/categories", async (req, res) => {
   catch (error) { res.status(500).json({ message: "Unable to load product categories" }); }
 });
 
+app.get("/api/categories", async (req, res) => {
+  try {
+    res.json({ categories: await store.listCategories({ homeOnly: req.query.view === "home" }) });
+  } catch (error) {
+    sendStoreError(res, error, "Unable to load categories");
+  }
+});
+
 app.get("/api/products/search", async (req, res) => {
   try {
     const query = String(req.query.q || "").trim().slice(0, 80);
-    const category = String(req.query.category || "").trim().slice(0, 60);
+    const filters = await store.resolvePublicCategoryFilters({
+      category: String(req.query.category || "").trim().slice(0, 60),
+      mainCategoryId: String(req.query.mainCategoryId || "").trim(),
+      subcategoryId: String(req.query.subcategoryId || "").trim()
+    });
     if (!query) return res.json({ success: true, data: { query, suggestions: [], products: [], total: 0 } });
-    const data = await store.searchProductCatalog({ query, category });
+    const data = await store.searchProductCatalog({ query, ...filters });
     res.json({ success: true, data: { query, ...data } });
   } catch (error) {
-    res.status(500).json({ message: "Search is temporarily unavailable" });
+    sendStoreError(res, error, "Search is temporarily unavailable");
   }
 });
 
@@ -77,6 +109,7 @@ app.get("/api/products/:id", async (req, res) => {
   try {
     const product = await store.getProduct(req.params.id);
     if (!product) return res.status(404).json({ message: "Product not found" });
+    if (!await store.isProductCategoryVisible(product)) return res.status(404).json({ message: "Product not found" });
     res.json(product);
   } catch (error) { res.status(500).json({ message: error.message }); }
 });
@@ -277,6 +310,44 @@ app.post("/api/uploads/image", requireAuth, requireAdmin, handleImageUpload, asy
   }
 });
 
+app.get("/api/admin/categories", requireAuth, requireAdmin, async (req, res) => {
+  try {
+    res.json({ categories: await store.listCategories({ includeInactive: true }) });
+  } catch (error) {
+    sendStoreError(res, error, "Unable to load categories");
+  }
+});
+app.post("/api/admin/categories", requireAuth, requireAdmin, async (req, res) => {
+  try {
+    res.status(201).json(await store.createCategory(req.body || {}));
+  } catch (error) {
+    sendStoreError(res, error, "Category could not be created");
+  }
+});
+app.put("/api/admin/categories/:id", requireAuth, requireAdmin, async (req, res) => {
+  try {
+    const category = await store.updateCategory(req.params.id, req.body || {});
+    if (!category) return res.status(404).json({ message: "Category not found" });
+    res.json(category);
+  } catch (error) {
+    sendStoreError(res, error, "Category could not be updated");
+  }
+});
+app.delete("/api/admin/categories/:id", requireAuth, requireAdmin, async (req, res) => {
+  try {
+    if (!await store.deleteCategory(req.params.id)) return res.status(404).json({ message: "Category not found" });
+    res.json({ success: true });
+  } catch (error) {
+    sendStoreError(res, error, "Category could not be deleted");
+  }
+});
+app.get("/api/admin/products/unmapped-categories", requireAuth, requireAdmin, async (req, res) => {
+  try {
+    res.json({ products: await store.unmappedProducts() });
+  } catch (error) {
+    sendStoreError(res, error, "Unable to load products that need category mapping");
+  }
+});
 app.get("/api/admin/stats", requireAuth, requireAdmin, async (req, res) => res.json(await store.getStats()));
 app.get("/api/admin/customers", requireAuth, requireAdmin, async (req, res) => res.json(await store.listCustomers()));
 app.get("/api/admin/orders", requireAuth, requireAdmin, async (req, res) => res.json(await store.listOrders({ all: true })));
@@ -331,32 +402,27 @@ app.patch("/api/admin/orders/:id/payment/reject", requireAuth, requireAdmin, asy
 app.post("/api/admin/products", requireAuth, requireAdmin, async (req, res) => {
   try {
     if (!String(req.body?.name || "").trim()) return res.status(400).json({ message: "Product name is required" });
-    if (Object.prototype.hasOwnProperty.call(req.body || {}, "category") && (typeof req.body.category !== "string" || !req.body.category.trim())) {
-      return res.status(400).json({ message: "Product category must be a non-empty string" });
-    }
-    res.status(201).json(await store.createProduct(req.body));
+    const category = await store.resolveProductCategory(req.body?.mainCategoryId, req.body?.subcategoryId);
+    res.status(201).json(await store.createProduct({ ...req.body, ...category }));
   } catch (error) {
-    console.error("Product creation failed:", error.message);
-    res.status(500).json({ message: "Product could not be saved" });
+    sendStoreError(res, error, "Product could not be saved");
   }
 });
 app.put("/api/admin/products/:id", requireAuth, requireAdmin, async (req, res) => {
   try {
-    if (Object.prototype.hasOwnProperty.call(req.body || {}, "category") && (typeof req.body.category !== "string" || !req.body.category.trim())) {
-      return res.status(400).json({ message: "Product category must be a non-empty string" });
-    }
     const existing = await store.getProduct(req.params.id);
     if (!existing) return res.status(404).json({ message: "Product not found" });
-    const product = await store.updateProduct(req.params.id, req.body);
+    let category = {};
+    if (Object.prototype.hasOwnProperty.call(req.body || {}, "mainCategoryId") || Object.prototype.hasOwnProperty.call(req.body || {}, "subcategoryId")) {
+      category = await store.resolveProductCategory(req.body.mainCategoryId || existing.mainCategoryId, req.body.subcategoryId || existing.subcategoryId);
+    }
+    const product = await store.updateProduct(req.params.id, { ...req.body, ...category });
     const imageMetadataProvided = Object.prototype.hasOwnProperty.call(req.body, "imagePublicId");
     if (imageMetadataProvided && existing.imagePublicId && existing.imagePublicId !== req.body.imagePublicId) {
       try { await deleteImage(existing.imagePublicId); } catch (error) { console.error("Old Cloudinary image cleanup failed:", error.message); }
     }
     res.json(product);
-  } catch (error) {
-    console.error("Product update failed:", error.message);
-    res.status(500).json({ message: "Product could not be updated" });
-  }
+  } catch (error) { sendStoreError(res, error, "Product could not be updated"); }
 });
 app.delete("/api/admin/products/:id", requireAuth, requireAdmin, async (req, res) => {
   try {

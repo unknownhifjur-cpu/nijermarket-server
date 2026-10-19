@@ -9,6 +9,8 @@ const productSchema = new mongoose.Schema({
   brand: { type: String, default: "" },
   tags: { type: [String], default: [] },
   category: { type: String, default: "Fresh Food" },
+  mainCategoryId: { type: mongoose.Schema.Types.ObjectId, ref: "Category", default: null },
+  subcategoryId: { type: mongoose.Schema.Types.ObjectId, ref: "Category", default: null },
   price: { type: Number, default: 0 },
   mrp: { type: Number, default: 0 },
   discount: { type: Number, default: 0 },
