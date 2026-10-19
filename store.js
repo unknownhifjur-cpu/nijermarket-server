@@ -10,8 +10,8 @@ const { searchProducts } = require("./src/services/searchService");
 let mongoConnected = false;
 
 const seedProducts = [
-  { name: "Fresh Potato", nameBn: "আলু", nameBanglish: "alu", aliases: ["aloo", "potato"], category: "Fresh Food", price: 30, mrp: 45, discount: 33, unit: "1 kg", stock: 100, rating: 4.3, reviews: 95, badge: "Fresh", image: "https://images.unsplash.com/photo-1518977676601-b53f82aba655?auto=format&fit=crop&w=900&q=80" },
-  { name: "Fresh Tomato", nameBn: "টমেটো", nameBanglish: "tomato", aliases: ["tamato", "tameto", "tometo"], category: "Fresh Food", price: 40, mrp: 60, discount: 33, unit: "1 kg", stock: 90, rating: 4.5, reviews: 120, badge: "Fresh", image: "https://images.unsplash.com/photo-1592924357228-91a4daadcfea?auto=format&fit=crop&w=900&q=80" }
+  { name: "Fresh Potato", nameBn: "আলু", nameBanglish: "alu", aliases: ["aloo", "potato"], category: "Fresh Food", price: 30, mrp: 45, discount: 33, unit: "1 kg", stock: 100, badge: "Fresh", image: "https://images.unsplash.com/photo-1518977676601-b53f82aba655?auto=format&fit=crop&w=900&q=80" },
+  { name: "Fresh Tomato", nameBn: "টমেটো", nameBanglish: "tomato", aliases: ["tamato", "tameto", "tometo"], category: "Fresh Food", price: 40, mrp: 60, discount: 33, unit: "1 kg", stock: 90, badge: "Fresh", image: "https://images.unsplash.com/photo-1592924357228-91a4daadcfea?auto=format&fit=crop&w=900&q=80" }
 ];
 
 const demo = {

@@ -14,8 +14,6 @@ const productSchema = new mongoose.Schema({
   discount: { type: Number, default: 0 },
   unit: { type: String, default: "1 piece" },
   stock: { type: Number, default: 0 },
-  rating: { type: Number, default: 4.5 },
-  reviews: { type: Number, default: 0 },
   badge: { type: String, default: "Popular" },
   image: { type: String, default: "" },
   imagePublicId: { type: String, default: "" },
